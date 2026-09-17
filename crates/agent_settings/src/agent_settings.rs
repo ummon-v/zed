@@ -305,7 +305,8 @@ pub fn language_model_to_selection(
         Some(current) => LanguageModelSelection {
             provider,
             model: model_name,
-            enable_thinking: current.enable_thinking && model.supports_thinking(),
+            enable_thinking: (current.enable_thinking || !model.supports_disabling_thinking())
+                && model.supports_thinking(),
             effort: current
                 .effort
                 .clone()
