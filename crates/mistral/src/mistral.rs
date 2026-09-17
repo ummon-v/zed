@@ -4,6 +4,7 @@ use http_client::{
     AsyncBody, CustomHeaders, HttpClient, HttpRequestExt, Method, Request as HttpRequest,
     RequestBuilderExt,
 };
+pub use language_model_core::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::convert::TryFrom;
@@ -193,6 +194,26 @@ impl Model {
             _ => false,
         }
     }
+
+    /// Whether thinking can be turned off. Z.ai GLM models always think and
+    /// reject `reasoning_effort: "none"`, so only effort is configurable.
+    pub fn supports_disabling_thinking(&self) -> bool {
+        !matches!(self, Self::ZaiGlmLatest)
+    }
+
+    /// The reasoning efforts accepted by the API for this model. Empty for
+    /// toggle-controlled models, whose only choices are "off" (field omitted)
+    /// and `high`.
+    pub fn supported_reasoning_efforts(&self) -> &'static [ReasoningEffort] {
+        match self {
+            Self::ZaiGlmLatest => &[
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ],
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -216,13 +237,6 @@ pub struct Request {
     pub tools: Vec<ToolDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    None,
-    High,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

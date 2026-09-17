@@ -7,11 +7,11 @@ use gpui::{App, AppContext, AsyncApp, Context, Entity, Global, SharedString, Tas
 use http_client::{CustomHeaders, HttpClient};
 use language_model::{
     ApiKeyConfiguration, ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel,
-    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId, LanguageModelName,
-    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
-    LanguageModelToolResultContent, LanguageModelToolUse, MessageContent, ProviderSettingsView,
-    RateLimiter, Role, StopReason, TokenUsage, env_var,
+    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelEffortLevel,
+    LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
+    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
+    LanguageModelToolChoice, LanguageModelToolResultContent, LanguageModelToolUse, MessageContent,
+    ProviderSettingsView, RateLimiter, Role, StopReason, TokenUsage, env_var,
 };
 pub use mistral::{MISTRAL_API_URL, StreamResponse};
 pub use settings::MistralAvailableModel as AvailableModel;
@@ -323,6 +323,22 @@ impl LanguageModel for MistralLanguageModel {
         self.model.supports_thinking()
     }
 
+    fn supports_disabling_thinking(&self) -> bool {
+        self.model.supports_disabling_thinking()
+    }
+
+    fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
+        self.model
+            .supported_reasoning_efforts()
+            .iter()
+            .map(|&effort| LanguageModelEffortLevel {
+                name: effort.label().into(),
+                value: effort.value().into(),
+                is_default: effort == mistral::ReasoningEffort::High,
+            })
+            .collect()
+    }
+
     fn telemetry_id(&self) -> String {
         format!("mistral/{}", self.model.id())
     }
@@ -587,10 +603,27 @@ pub fn into_mistral(
                     })
                 })
                 .collect::<Result<_>>()?,
-            reasoning_effort: if model.supports_thinking() && request.thinking_allowed {
-                Some(mistral::ReasoningEffort::High)
-            } else {
-                None
+            reasoning_effort: {
+                if !model.supports_thinking() {
+                    None
+                } else if model.supports_disabling_thinking() {
+                    // Toggle-controlled models: enable thinking at high effort,
+                    // or omit the field to keep the API's thinking-off default.
+                    request
+                        .thinking_allowed
+                        .then_some(mistral::ReasoningEffort::High)
+                } else {
+                    // Models that always think expose an effort selector
+                    // instead of a toggle. Omitting the field falls back to the
+                    // API's default effort.
+                    request
+                        .thinking_effort
+                        .as_deref()
+                        .and_then(|effort| effort.parse::<mistral::ReasoningEffort>().ok())
+                        // The API rejects "none" for these models; leaving the
+                        // field unset is the only way to request the default.
+                        .filter(|effort| *effort != mistral::ReasoningEffort::None)
+                }
             },
         },
         request.thread_id,
@@ -918,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_into_mistral_reasoning_effort() {
-        let request = |thinking_allowed| LanguageModelRequest {
+        let request = |thinking_allowed, thinking_effort| LanguageModelRequest {
             messages: vec![LanguageModelRequestMessage {
                 role: Role::User,
                 content: vec![MessageContent::Text("Hello".into())],
@@ -933,26 +966,76 @@ mod tests {
             intent: None,
             stop: vec![],
             thinking_allowed,
-            thinking_effort: None,
+            thinking_effort,
             speed: Default::default(),
             compact_at_tokens: None,
             max_output_tokens: None,
         };
 
-        let (mistral_request, _) =
-            into_mistral(request(true), mistral::Model::MistralMediumLatest, None).unwrap();
+        // Toggle-controlled models send "high" when thinking is allowed and
+        // omit the field otherwise.
+        let (mistral_request, _) = into_mistral(
+            request(true, None),
+            mistral::Model::MistralMediumLatest,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             mistral_request.reasoning_effort,
             Some(mistral::ReasoningEffort::High)
         );
 
-        let (mistral_request, _) =
-            into_mistral(request(false), mistral::Model::MistralMediumLatest, None).unwrap();
+        let (mistral_request, _) = into_mistral(
+            request(false, None),
+            mistral::Model::MistralMediumLatest,
+            None,
+        )
+        .unwrap();
         assert_eq!(mistral_request.reasoning_effort, None);
 
         let (mistral_request, _) =
-            into_mistral(request(true), mistral::Model::CodestralLatest, None).unwrap();
+            into_mistral(request(true, None), mistral::Model::CodestralLatest, None).unwrap();
         assert_eq!(mistral_request.reasoning_effort, None);
+
+        // Models that cannot disable thinking map the selected effort instead,
+        // regardless of the stale toggle state.
+        for (effort, expected) in [
+            ("low", mistral::ReasoningEffort::Low),
+            ("high", mistral::ReasoningEffort::High),
+            ("max", mistral::ReasoningEffort::Max),
+        ] {
+            let (mistral_request, _) = into_mistral(
+                request(false, Some(effort.into())),
+                mistral::Model::ZaiGlmLatest,
+                None,
+            )
+            .unwrap();
+            assert_eq!(mistral_request.reasoning_effort, Some(expected));
+        }
+
+        let (mistral_request, _) =
+            into_mistral(request(true, None), mistral::Model::ZaiGlmLatest, None).unwrap();
+        assert_eq!(mistral_request.reasoning_effort, None);
+    }
+
+    #[test]
+    fn test_zai_glm_thinking_capabilities() {
+        let model = mistral::Model::ZaiGlmLatest;
+        assert!(model.supports_thinking());
+        assert!(!model.supports_disabling_thinking());
+        assert_eq!(
+            model.supported_reasoning_efforts(),
+            &[
+                mistral::ReasoningEffort::Low,
+                mistral::ReasoningEffort::High,
+                mistral::ReasoningEffort::Max,
+            ]
+        );
+
+        let model = mistral::Model::MistralSmallLatest;
+        assert!(model.supports_thinking());
+        assert!(model.supports_disabling_thinking());
+        assert!(model.supported_reasoning_efforts().is_empty());
     }
 
     #[test]
