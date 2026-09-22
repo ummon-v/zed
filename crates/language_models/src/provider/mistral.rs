@@ -608,10 +608,14 @@ pub fn into_mistral(
                     None
                 } else if model.supports_disabling_thinking() {
                     // Toggle-controlled models: enable thinking at high effort,
-                    // or omit the field to keep the API's thinking-off default.
-                    request
-                        .thinking_allowed
-                        .then_some(mistral::ReasoningEffort::High)
+                    // or send "none" explicitly. The API currently treats an
+                    // omitted field as thinking-off too, but pinning the value
+                    // guards against a change of that default.
+                    Some(if request.thinking_allowed {
+                        mistral::ReasoningEffort::High
+                    } else {
+                        mistral::ReasoningEffort::None
+                    })
                 } else {
                     // Models that always think expose an effort selector
                     // instead of a toggle. Omitting the field falls back to the
@@ -973,7 +977,7 @@ mod tests {
         };
 
         // Toggle-controlled models send "high" when thinking is allowed and
-        // omit the field otherwise.
+        // "none" otherwise.
         let (mistral_request, _) = into_mistral(
             request(true, None),
             mistral::Model::MistralMediumLatest,
@@ -991,7 +995,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(mistral_request.reasoning_effort, None);
+        assert_eq!(
+            mistral_request.reasoning_effort,
+            Some(mistral::ReasoningEffort::None)
+        );
 
         let (mistral_request, _) =
             into_mistral(request(true, None), mistral::Model::CodestralLatest, None).unwrap();
